@@ -1,0 +1,15 @@
+[build]
+  command = "npm run build"
+  publish = "out"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# The app is a static export (next.config.ts sets output: "export"), so Netlify
+# serves the pre-rendered files in `out/` directly. No serverless runtime needed.
+
+# Serve the generated 404 page for unknown routes.
+[[redirects]]
+  from = "/*"
+  to = "/404.html"
+  status = 404
