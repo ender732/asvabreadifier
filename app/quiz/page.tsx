@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import {
   CWT_LINE_SCORE_TARGET,
   DAILY_QUESTION_LIMIT,
@@ -14,24 +14,19 @@ import {
 } from "@/lib/adaptiveDrill";
 import type { AsvabScores } from "@/lib/asvabScoring";
 import { generateAsvabQuestion } from "@/lib/questionGenerator";
-
-const INITIAL_SCORES: AsvabScores = {
-  GS: 58,
-  AR: 56,
-  MK: 58,
-  MC: 50,
-  WK: 35,
-  PC: 34,
-  CT: 58,
-};
-
-const INITIAL_PERFORMANCE: TagPerformance[] = [
-  { subject: "MK", tag: "Algebra", attempts: 4, correct: 1 },
-  { subject: "AR", tag: "Percentages", attempts: 4, correct: 1 },
-  { subject: "AR", tag: "Word Problems", attempts: 5, correct: 2 },
-  { subject: "WK", tag: "Synonyms", attempts: 5, correct: 3 },
-  { subject: "WK", tag: "Context Clues", attempts: 5, correct: 2 },
-];
+import {
+  assessmentFromScores,
+  createEmptyProgress,
+  EMPTY_PERFORMANCE,
+  EMPTY_SCORES,
+  getLocalProgressSnapshot,
+  readLocalProgress,
+  readStoredSafeWord,
+  saveProgressToCloud,
+  subscribeToLocalProgress,
+  writeLocalProgress,
+  type UserProgress,
+} from "@/lib/progress";
 
 function generateFreshQuestion(
   subject: TagPerformance["subject"],
@@ -46,9 +41,51 @@ function generateFreshQuestion(
   return question;
 }
 
+function parseProgress(raw: string | null): UserProgress | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as UserProgress;
+  } catch {
+    return null;
+  }
+}
+
+function persistProgress(
+  scores: AsvabScores,
+  performance: TagPerformance[],
+): void {
+  const existing = readLocalProgress() ?? createEmptyProgress();
+  writeLocalProgress({
+    ...existing,
+    scores,
+    performance,
+    assessment: assessmentFromScores(scores),
+  });
+
+  const safeWord = readStoredSafeWord();
+  if (!safeWord) return;
+
+  void saveProgressToCloud(safeWord, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    scores,
+    performance,
+    assessment: assessmentFromScores(scores),
+  }).catch(() => {
+    // Local save already succeeded; cloud sync can retry later.
+  });
+}
+
 export default function AdaptiveCwtDrill() {
-  const [scores, setScores] = useState(INITIAL_SCORES);
-  const [performance, setPerformance] = useState(INITIAL_PERFORMANCE);
+  const rawProgress = useSyncExternalStore(
+    subscribeToLocalProgress,
+    getLocalProgressSnapshot,
+    () => null,
+  );
+  const saved = parseProgress(rawProgress);
+  const scores = saved?.scores ?? EMPTY_SCORES;
+  const performance = saved?.performance ?? EMPTY_PERFORMANCE;
+
   const [question, setQuestion] = useState<DrillQuestion | null>(null);
   const [questionNumber, setQuestionNumber] = useState(1);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
@@ -64,13 +101,9 @@ export default function AdaptiveCwtDrill() {
   const targetReached = lineScore.score >= CWT_LINE_SCORE_TARGET;
   const drillLimitReached = questionNumber >= DAILY_QUESTION_LIMIT;
 
-  const failingTags = useMemo(
-    () =>
-      [...performance]
-        .filter((item) => getTagAccuracy(item) < 0.7)
-        .sort((a, b) => getTagAccuracy(a) - getTagAccuracy(b)),
-    [performance],
-  );
+  const failingTags = [...performance]
+    .filter((item) => getTagAccuracy(item) < 0.7)
+    .sort((a, b) => getTagAccuracy(a) - getTagAccuracy(b));
 
   function chooseAnswer(index: number) {
     if (!question || answered) return;
@@ -78,20 +111,23 @@ export default function AdaptiveCwtDrill() {
     const correct = index === question.correctIndex;
     setSelectedIndex(index);
     setResults((current) => [...current, correct]);
-    setScores((current) =>
-      projectScoresAfterAnswer(current, question.subject, correct),
+
+    const nextScores = projectScoresAfterAnswer(
+      scores,
+      question.subject,
+      correct,
     );
-    setPerformance((current) =>
-      current.map((item) =>
-        item.tag === question.tag
-          ? {
-              ...item,
-              attempts: item.attempts + 1,
-              correct: item.correct + (correct ? 1 : 0),
-            }
-          : item,
-      ),
+    const nextPerformance = performance.map((item) =>
+      item.tag === question.tag
+        ? {
+            ...item,
+            attempts: item.attempts + 1,
+            correct: item.correct + (correct ? 1 : 0),
+          }
+        : item,
     );
+
+    persistProgress(nextScores, nextPerformance);
   }
 
   function continueDrill() {
@@ -124,7 +160,7 @@ export default function AdaptiveCwtDrill() {
 
   function startDrill() {
     const target = selectNextDrillTarget({
-      performance: INITIAL_PERFORMANCE,
+      performance,
       retryTag: null,
     });
     if (target) {
@@ -139,15 +175,13 @@ export default function AdaptiveCwtDrill() {
   }
 
   function restartDrill() {
-    setScores(INITIAL_SCORES);
-    setPerformance(INITIAL_PERFORMANCE);
     setQuestionNumber(1);
     setSelectedIndex(null);
     setResults([]);
     setFinished(false);
     setUsedPrompts(new Set());
     const target = selectNextDrillTarget({
-      performance: INITIAL_PERFORMANCE,
+      performance,
       retryTag: null,
     });
     const firstQuestion = target

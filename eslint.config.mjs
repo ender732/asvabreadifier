@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Capacitor sync copies the static export here; don't lint bundled assets.
+    "ios/**",
+    "netlify/functions/**",
   ]),
 ]);
 
